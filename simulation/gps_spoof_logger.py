@@ -4,7 +4,7 @@ import time
 import os
 
 # ── CONFIGURATION ──
-OUTPUT_FILE     = '../data/gps_spoofing_05.csv'
+OUTPUT_FILE     = '../data/gps_spoofing_01.csv'
 FLIGHT_DURATION = 120
 ATTACK_START    = 30
 LABEL_NORMAL    = 0

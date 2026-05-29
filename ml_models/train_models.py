@@ -32,6 +32,8 @@ print(f"Total rows loaded: {len(data)}")
 print(f"Label distribution:\n{data['label'].value_counts()}\n")
 
 # ── FEATURE SELECTION ──
+# Deliberately excluding gps_fix_type and gps_satellites
+# to force the model to rely on EKF residuals for spoofing detection
 features = [
     'residual_lat',
     'residual_lon',
@@ -48,7 +50,6 @@ features = [
 X = data[features].fillna(0)
 y = data['label']
 
-# Get unique labels present in data
 unique_labels = sorted(y.unique())
 label_names   = {0: 'Normal', 1: 'Spoofing', 2: 'Jamming'}
 target_names  = [label_names[l] for l in unique_labels]
@@ -93,18 +94,15 @@ print("Classification Report:")
 print(classification_report(y_test, y_pred_rf,
       labels=unique_labels, target_names=target_names))
 
-# Confusion matrix
 cm_rf = confusion_matrix(y_test, y_pred_rf, labels=unique_labels)
 print("Confusion Matrix:")
 print(cm_rf)
 
-# Feature importance
 print("\nFeature Importances:")
 importances = rf.feature_importances_
 for feat, imp in sorted(zip(features, importances), key=lambda x: -x[1]):
     print(f"  {feat:<25} {imp:.4f}")
 
-# Cross validation
 print("\nCross-validation (5-fold):")
 cv_scores = cross_val_score(rf, X_train_scaled, y_train, cv=5, scoring='f1_weighted')
 print(f"  F1 scores: {cv_scores.round(4)}")
@@ -141,7 +139,8 @@ print("Confusion matrix plot saved.")
 # ── PLOT FEATURE IMPORTANCE ──
 fig, ax = plt.subplots(figsize=(8, 5))
 sorted_idx = np.argsort(importances)
-ax.barh([features[i] for i in sorted_idx], importances[sorted_idx], color='steelblue')
+ax.barh([features[i] for i in sorted_idx], importances[sorted_idx],
+        color='steelblue')
 ax.set_xlabel('Importance')
 ax.set_title('Random Forest — Feature Importances')
 plt.tight_layout()
