@@ -1,29 +1,70 @@
+import dronekit
+from dronekit import connect, VehicleMode, LocationGlobalRelative
 from pymavlink import mavutil
 import csv
 import time
 import os
+import threading
+import math
 
 # ── CONFIGURATION ──
-OUTPUT_FILE = '../data/normal_flight_05.csv'
-FLIGHT_DURATION = 120  # seconds
-LABEL = 0  # 0 = normal, 1 = spoofing, 2 = jamming
+OUTPUT_FILE  = '../data/normal_flight_01.csv'
+LABEL        = 0
+TAKEOFF_ALT  = 20
+FLIGHT_SPEED = 3
 
 # ── CONNECT ──
 print("Connecting to SITL...")
-master = mavutil.mavlink_connection('tcp:127.0.0.1:5760')
-master.wait_heartbeat()
-print("Connected. Heartbeat received.")
+vehicle = connect('tcp:127.0.0.1:5760', wait_ready=True, timeout=60)
+print("Connected.")
+print(f"  Firmware: {vehicle.version}")
+print(f"  GPS fix: {vehicle.gps_0.fix_type}")
+print(f"  Satellites: {vehicle.gps_0.satellites_visible}")
 
-# ── REQUEST DATA STREAMS ──
-master.mav.request_data_stream_send(
-    master.target_system,
-    master.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL,
-    10,  # 10 Hz
-    1
-)
-time.sleep(2)
-print("Data streams requested.")
+# ── HELPER FUNCTIONS ──
+def arm_and_takeoff(alt):
+    print("Waiting for vehicle to be armable...")
+    while not vehicle.is_armable:
+        print("  Not armable yet — waiting...")
+        time.sleep(1)
+
+    print("Arming...")
+    vehicle.mode = VehicleMode("GUIDED")
+    vehicle.armed = True
+
+    while not vehicle.armed:
+        print("  Waiting for arm...")
+        time.sleep(1)
+    print("Armed.")
+
+    print(f"Taking off to {alt}m...")
+    vehicle.simple_takeoff(alt)
+
+    while True:
+        current_alt = vehicle.location.global_relative_frame.alt
+        print(f"  Altitude: {current_alt:.1f}m", end='\r')
+        if current_alt >= alt * 0.95:
+            print(f"\nReached target altitude: {current_alt:.1f}m")
+            break
+        time.sleep(0.5)
+
+def send_ned_velocity(vx, vy, vz):
+    msg = vehicle.message_factory.set_position_target_local_ned_encode(
+        0, 0, 0,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        0b0000111111000111,
+        0, 0, 0,
+        vx, vy, vz,
+        0, 0, 0,
+        0, 0
+    )
+    vehicle.send_mavlink(msg)
+
+def fly_segment(vx, vy, vz, duration):
+    end = time.time() + duration
+    while time.time() < end:
+        send_ned_velocity(vx, vy, vz)
+        time.sleep(0.1)
 
 # ── PREPARE CSV ──
 os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
@@ -38,70 +79,89 @@ fields = [
     'label'
 ]
 
-# ── SENSOR STORAGE ──
-sensors = {
-    'gps_lat': 0, 'gps_lon': 0, 'gps_alt': 0,
-    'gps_fix_type': 0, 'gps_satellites': 0, 'gps_speed': 0,
-    'imu_xacc': 0, 'imu_yacc': 0, 'imu_zacc': 0,
-    'imu_xgyro': 0, 'imu_ygyro': 0, 'imu_zgyro': 0,
-    'baro_pressure': 0, 'baro_temp': 0,
-    'mag_x': 0, 'mag_y': 0, 'mag_z': 0,
-}
+# ── FLIGHT PLAN ──
+flight_plan = [
+    (FLIGHT_SPEED,  0, 0, 10),
+    (0,  FLIGHT_SPEED, 0, 10),
+    (-FLIGHT_SPEED, 0, 0, 10),
+    (0, -FLIGHT_SPEED, 0, 10),
+    (FLIGHT_SPEED,  0, 0, 10),
+    (0,  FLIGHT_SPEED, 0, 10),
+    (-FLIGHT_SPEED, 0, 0, 10),
+    (0, -FLIGHT_SPEED, 0, 10),
+]
 
-print(f"Logging to {OUTPUT_FILE} for {FLIGHT_DURATION} seconds...")
-print("Starting now. Press Ctrl+C to stop early.\n")
+flight_done = threading.Event()
 
-start_time = time.time()
+def fly():
+    for vx, vy, vz, dur in flight_plan:
+        print(f"\n  Flying: vx={vx} vy={vy} for {dur}s")
+        fly_segment(vx, vy, vz, dur)
+    # Hover
+    print("\n  Hovering for 15s...")
+    fly_segment(0, 0, 0, 15)
+    flight_done.set()
+    print("  Flight complete")
+
+# ── ARM AND TAKE OFF ──
+arm_and_takeoff(TAKEOFF_ALT)
+
+# ── START LOGGING AND FLYING ──
+print(f"\nLogging to {OUTPUT_FILE}\n")
+start_time   = time.time()
 rows_written = 0
+
+flight_thread = threading.Thread(target=fly)
+flight_thread.start()
 
 with open(OUTPUT_FILE, 'w', newline='') as csvfile:
     writer = csv.DictWriter(csvfile, fieldnames=fields)
     writer.writeheader()
 
-    while time.time() - start_time < FLIGHT_DURATION:
-        msg = master.recv_match(
-            type=['GPS_RAW_INT', 'RAW_IMU', 'SCALED_PRESSURE', 'RAW_IMU'],
-            blocking=True,
-            timeout=1
-        )
+    while not flight_done.is_set():
+        elapsed = time.time() - start_time
 
-        if msg is None:
-            continue
+        loc     = vehicle.location.global_frame
+        gps     = vehicle.gps_0
+        att     = vehicle.attitude
+        vel     = vehicle.velocity
+        baro    = vehicle.location.global_relative_frame
+        imu     = vehicle.raw_imu
+        baro_p  = vehicle.scaled_pressure
 
-        msg_type = msg.get_type()
+        row = {
+            'timestamp':      round(elapsed, 3),
+            'gps_lat':        loc.lat if loc.lat else 0,
+            'gps_lon':        loc.lon if loc.lon else 0,
+            'gps_alt':        loc.alt if loc.alt else 0,
+            'gps_fix_type':   gps.fix_type,
+            'gps_satellites': gps.satellites_visible,
+            'gps_speed':      math.sqrt(vel[0]**2 + vel[1]**2) if vel else 0,
+            'imu_xacc':       imu.xacc if imu else 0,
+            'imu_yacc':       imu.yacc if imu else 0,
+            'imu_zacc':       imu.zacc if imu else 0,
+            'imu_xgyro':      imu.xgyro if imu else 0,
+            'imu_ygyro':      imu.ygyro if imu else 0,
+            'imu_zgyro':      imu.zgyro if imu else 0,
+            'baro_pressure':  baro_p.press_abs if baro_p else 0,
+            'baro_temp':      baro_p.temperature if baro_p else 0,
+            'mag_x':          imu.xmag if imu else 0,
+            'mag_y':          imu.ymag if imu else 0,
+            'mag_z':          imu.zmag if imu else 0,
+            'label':          LABEL
+        }
 
-        if msg_type == 'GPS_RAW_INT':
-            sensors['gps_lat']        = msg.lat / 1e7
-            sensors['gps_lon']        = msg.lon / 1e7
-            sensors['gps_alt']        = msg.alt / 1000.0
-            sensors['gps_fix_type']   = msg.fix_type
-            sensors['gps_satellites'] = msg.satellites_visible
-            sensors['gps_speed']      = msg.vel / 100.0
+        writer.writerow(row)
+        rows_written += 1
 
-        elif msg_type == 'RAW_IMU':
-            sensors['imu_xacc']  = msg.xacc
-            sensors['imu_yacc']  = msg.yacc
-            sensors['imu_zacc']  = msg.zacc
-            sensors['imu_xgyro'] = msg.xgyro
-            sensors['imu_ygyro'] = msg.ygyro
-            sensors['imu_zgyro'] = msg.zgyro
-            sensors['mag_x']     = msg.xmag
-            sensors['mag_y']     = msg.ymag
-            sensors['mag_z']     = msg.zmag
+        if rows_written % 50 == 0:
+            print(f"  {round(elapsed,1)}s — {rows_written} rows — "
+                  f"GPS: {row['gps_lat']:.6f}, {row['gps_lon']:.6f} — "
+                  f"alt: {baro.alt:.1f}m — "
+                  f"speed: {row['gps_speed']:.1f}m/s")
 
-        elif msg_type == 'SCALED_PRESSURE':
-            sensors['baro_pressure'] = msg.press_abs
-            sensors['baro_temp']     = msg.temperature
+        time.sleep(0.1)
 
-        # Write a row every time we get a GPS update
-        if msg_type == 'GPS_RAW_INT':
-            row = {'timestamp': round(time.time() - start_time, 3), 'label': LABEL}
-            row.update(sensors)
-            writer.writerow(row)
-            rows_written += 1
-
-            if rows_written % 20 == 0:
-                elapsed = round(time.time() - start_time, 1)
-                print(f"  {elapsed}s — {rows_written} rows — GPS fix: {sensors['gps_fix_type']} — Sats: {sensors['gps_satellites']}")
-
+flight_thread.join()
+vehicle.close()
 print(f"\nDone. {rows_written} rows written to {OUTPUT_FILE}")
