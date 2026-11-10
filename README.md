@@ -9,6 +9,6 @@ in UAVs using sensor fusion (EKF) and machine learning.
 - simulation/ - SITL flight and attack injection scripts
 - sensor_fusion/ - Extended Kalman Filter implementation
 - ml_models/ - Random Forest and LSTM classifiers
-- countermeasures/ - Sensor fallback response module
+- countermeasure/ - Sensor fallback response module
 - data/ - Labelled flight datasets
 - results/ - Evaluation metrics and charts
